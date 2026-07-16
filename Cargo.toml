@@ -1,6 +1,6 @@
 [package]
 name = "zellij-agent-tabs"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 description = "Agent-aware vertical tab bar plugin for zellij (fork of cfal/zellij-vertical-tabs)"
 license = "MIT"
