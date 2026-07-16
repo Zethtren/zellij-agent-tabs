@@ -51,31 +51,71 @@ jobs:
           path: target/wasm32-wasip1/release/zellij-agent-tabs.wasm
           if-no-files-found: error
 
+  # Auto-versioning:
+  #   - push to master        -> patch bump from the latest v* tag (tag + Cargo.toml)
+  #   - push a tag vX.Y.Z      -> release that exact version (use for minor/major bumps)
+  # The Cargo.toml sync commit and the created tag use GITHUB_TOKEN, which by design
+  # does NOT trigger another workflow run (plus "[skip ci]" as belt-and-suspenders).
   release:
-    name: Create Release
+    name: Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download all artifacts
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: v
+        run: |
+          git fetch --tags --force
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/v}"          # manual minor/major
+          else
+            latest="$(git tag -l 'v*' --sort=-version:refname | head -n1)"
+            latest="${latest:-v0.0.0}"
+            base="${latest#v}"
+            major="${base%%.*}"; rest="${base#*.}"; minor="${rest%%.*}"; patch="${rest##*.}"
+            ver="${major}.${minor}.$((patch + 1))"   # master patch bump
+          fi
+          echo "ver=$ver"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Sync Cargo.toml version on master
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B master origin/master
+          sed -i -E "0,/^version = \".*\"/{s//version = \"${{ steps.v.outputs.ver }}\"/}" Cargo.toml
+          if ! git diff --quiet Cargo.toml; then
+            git add Cargo.toml
+            git commit -m "chore(release): ${{ steps.v.outputs.tag }} [skip ci]"
+            git push origin master
+          fi
+
+      - name: Create tag (master patch bumps only)
+        if: github.ref == 'refs/heads/master'
+        run: |
+          git tag "${{ steps.v.outputs.tag }}"
+          git push origin "${{ steps.v.outputs.tag }}"
+
+      - name: Collect wasm
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-
-      - name: List artifacts
-        run: |
-          echo "Downloaded artifacts:"
-          find artifacts -type f -name "*.wasm" | sort
-
-      - name: Flatten artifacts
-        run: |
+      - run: |
           mkdir -p release-artifacts
           find artifacts -type f -name "*.wasm" -exec cp {} release-artifacts/ \;
           ls -la release-artifacts/
 
-      - name: Create Release
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          name: ${{ steps.v.outputs.tag }}
           files: release-artifacts/*
           draft: false
           generate_release_notes: true
