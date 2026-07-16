@@ -132,6 +132,14 @@ fn parse_rgb_func(inner: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+/// Convert a Zellij theme PaletteColor into our ColorSpec.
+fn palette_to_spec(c: PaletteColor) -> ColorSpec {
+    match c {
+        PaletteColor::Rgb((r, g, b)) => ColorSpec::Rgb(r, g, b),
+        PaletteColor::EightBit(n) => ColorSpec::EightBit(n),
+    }
+}
+
 // ========== AGENT STATE ==========
 
 /// The state an agent (or command) reports for a pane, via the `agent_state` pipe.
@@ -153,6 +161,16 @@ impl AgentState {
             "done" => AgentState::Done,
             "error" => AgentState::Error,
             _ => AgentState::Idle,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            AgentState::Working => "working",
+            AgentState::Waiting => "waiting",
+            AgentState::Done => "done",
+            AgentState::Error => "error",
+            AgentState::Idle => "idle",
         }
     }
 }
@@ -178,6 +196,39 @@ impl Anim {
 
     fn is_animated(self) -> bool {
         matches!(self, Anim::Flash | Anim::Scroll)
+    }
+}
+
+/// Which visual channels a colour (state or focus) is drawn on. A set, so callers
+/// can mix e.g. "border glyph". Tokens: fill, border, glyph (alias dot), both, all, none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Channels {
+    fill: bool,
+    border: bool,
+    glyph: bool,
+}
+
+impl Channels {
+    fn parse(s: &str) -> Channels {
+        let mut c = Channels::default();
+        for tok in s.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '+') {
+            match tok.trim().to_lowercase().as_str() {
+                "fill" => c.fill = true,
+                "border" => c.border = true,
+                "glyph" | "dot" => c.glyph = true,
+                "both" => {
+                    c.fill = true;
+                    c.border = true;
+                }
+                "all" => {
+                    c.fill = true;
+                    c.border = true;
+                    c.glyph = true;
+                }
+                _ => {}
+            }
+        }
+        c
     }
 }
 
@@ -495,11 +546,11 @@ struct StyleConfig {
     // ----- agent-state presentation (all overridable via plugin config) -----
     /// Rows per tab box (>= 2). Default 3 gives a rounded box with one content row.
     tab_height: usize,
-    color_working: ColorSpec,
-    color_waiting: ColorSpec,
-    color_done: ColorSpec,
-    color_error: ColorSpec,
-    color_idle: ColorSpec,
+    // State fill colours; None => derive from the Zellij theme.
+    color_working: Option<ColorSpec>,
+    color_waiting: Option<ColorSpec>,
+    color_done: Option<ColorSpec>,
+    color_error: Option<ColorSpec>,
     anim_working: Anim,
     anim_waiting: Anim,
     anim_done: Anim,
@@ -508,19 +559,19 @@ struct StyleConfig {
     anim_interval_ms: u64,
     /// Aggregation order, highest priority first. Default: error > waiting > working > done > idle.
     state_priority: Vec<AgentState>,
+    /// Idle tab border colours. None => derive from the Zellij theme's frame colours
+    /// (focused/unfocused), i.e. the user's base config.
+    color_active_border: Option<ColorSpec>,
+    color_inactive_border: Option<ColorSpec>,
+    /// Channels the agent/action state is shown on (default fill) and the focus
+    /// indicator (default border). Accept: fill/border/glyph/both/all/none.
+    state_style: Channels,
+    focus_style: Channels,
+    /// The glyph drawn before the name when the "glyph" channel is on (default "●").
+    state_glyph: String,
 }
 
 impl StyleConfig {
-    fn color_for(&self, s: AgentState) -> ColorSpec {
-        match s {
-            AgentState::Working => self.color_working,
-            AgentState::Waiting => self.color_waiting,
-            AgentState::Done => self.color_done,
-            AgentState::Error => self.color_error,
-            AgentState::Idle => self.color_idle,
-        }
-    }
-
     fn anim_for(&self, s: AgentState) -> Anim {
         match s {
             AgentState::Working => self.anim_working,
@@ -548,11 +599,10 @@ impl Default for StyleConfig {
             start_index: 1,
             activity_format: "#[fg=dim]{activity}".to_string(),
             tab_height: 3,
-            color_working: parse_color_spec("green"),
-            color_waiting: parse_color_spec("orange"),
-            color_done: parse_color_spec("green"),
-            color_error: parse_color_spec("red"),
-            color_idle: ColorSpec::Default,
+            color_working: None,
+            color_waiting: None,
+            color_done: None,
+            color_error: None,
             anim_working: Anim::Scroll,
             anim_waiting: Anim::Flash,
             anim_done: Anim::Solid,
@@ -565,6 +615,19 @@ impl Default for StyleConfig {
                 AgentState::Done,
                 AgentState::Idle,
             ],
+            color_active_border: None,
+            color_inactive_border: None,
+            state_style: Channels {
+                fill: true,
+                border: false,
+                glyph: false,
+            },
+            focus_style: Channels {
+                fill: false,
+                border: true,
+                glyph: false,
+            },
+            state_glyph: "●".to_string(),
         }
     }
 }
@@ -592,6 +655,8 @@ struct State {
     timer_running: bool,
     /// Row ranges each visible tab occupies, rebuilt every render: (start, end_exclusive, tab_index).
     tab_rows: Vec<(usize, usize, usize)>,
+    /// Set when config is invalid (e.g. state_style/focus_style conflict); shown as a banner.
+    config_error: Option<String>,
 }
 
 register_plugin!(State);
@@ -651,19 +716,16 @@ impl ZellijPlugin for State {
             self.style.tab_height = n.max(2);
         }
         if let Some(v) = configuration.get("color_working") {
-            self.style.color_working = parse_color_spec(v);
+            self.style.color_working = Some(parse_color_spec(v));
         }
         if let Some(v) = configuration.get("color_waiting") {
-            self.style.color_waiting = parse_color_spec(v);
+            self.style.color_waiting = Some(parse_color_spec(v));
         }
         if let Some(v) = configuration.get("color_done") {
-            self.style.color_done = parse_color_spec(v);
+            self.style.color_done = Some(parse_color_spec(v));
         }
         if let Some(v) = configuration.get("color_error") {
-            self.style.color_error = parse_color_spec(v);
-        }
-        if let Some(v) = configuration.get("color_idle") {
-            self.style.color_idle = parse_color_spec(v);
+            self.style.color_error = Some(parse_color_spec(v));
         }
         if let Some(v) = configuration.get("anim_working") {
             self.style.anim_working = Anim::parse(v);
@@ -688,10 +750,40 @@ impl ZellijPlugin for State {
                 self.style.state_priority = order;
             }
         }
+        if let Some(v) = configuration.get("color_active_border") {
+            self.style.color_active_border = Some(parse_color_spec(v));
+        }
+        if let Some(v) = configuration.get("color_inactive_border") {
+            self.style.color_inactive_border = Some(parse_color_spec(v));
+        }
+        if let Some(v) = configuration.get("state_style") {
+            self.style.state_style = Channels::parse(v);
+        }
+        if let Some(v) = configuration.get("focus_style") {
+            self.style.focus_style = Channels::parse(v);
+        }
+        if let Some(v) = configuration.get("state_glyph") {
+            self.style.state_glyph = v.clone();
+        }
+        // A visualisation conflict: state and focus cannot share the same channel.
+        let s = self.style.state_style;
+        let f = self.style.focus_style;
+        self.config_error = if s.border && f.border {
+            Some("state_style & focus_style both use the BORDER — set one to fill/glyph/none".into())
+        } else if s.fill && f.fill {
+            Some("state_style & focus_style both use the FILL — set one to border/glyph/none".into())
+        } else if s.glyph && f.glyph {
+            Some("state_style & focus_style both use the GLYPH — set one to fill/border/none".into())
+        } else {
+            None
+        };
 
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
+            // Needed to broadcast a state-sync request/response via `zellij pipe`
+            // so a newly-created tab's plugin copy can catch up on existing state.
+            PermissionType::RunCommands,
         ]);
 
         subscribe(&[
@@ -713,6 +805,8 @@ impl ZellijPlugin for State {
                 self.permissions_granted = true;
                 self.is_selectable = false;
                 set_selectable(false);
+                // This copy just loaded (new tab): ask peers to resend their state.
+                self.request_state_sync();
 
                 while !self.pending_events.is_empty() {
                     let cached_event = self.pending_events.remove(0);
@@ -747,16 +841,11 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(pane_manifest) => {
                 self.pane_manifest = pane_manifest;
-                // Drop agent state for panes that no longer exist.
-                let live: std::collections::BTreeSet<u32> = self
-                    .pane_manifest
-                    .panes
-                    .values()
-                    .flatten()
-                    .filter(|p| !p.is_plugin)
-                    .map(|p| p.id)
-                    .collect();
-                self.pane_agents.retain(|id, _| live.contains(id));
+                // NOTE: do NOT prune pane_agents against this manifest. Zellij can send
+                // a PaneUpdate that omits background tabs' panes, and pruning would then
+                // permanently delete their state (e.g. an errored tab loses its red on a
+                // tab switch). A stale entry for a truly-closed pane is harmless — it
+                // simply won't match any live tab in tab_agent().
                 self.arm_timer();
                 should_render = true;
             }
@@ -773,6 +862,8 @@ impl ZellijPlugin for State {
                     if let Some(idx) = self.get_tab_at_row(row as usize) {
                         switch_tab_to(idx as u32);
                     }
+                    // Refresh so the click-row map stays current after any click.
+                    should_render = true;
                 }
                 Mouse::ScrollUp(_) => {
                     let prev_tab = max(self.active_tab_idx.saturating_sub(1), 1);
@@ -831,26 +922,25 @@ impl ZellijPlugin for State {
             // Agent state protocol: "<pane_id>\x1f<state>\x1f<agent>\x1f<label>"
             "agent_state" => {
                 if let Some(payload) = pipe_message.payload.as_deref() {
-                    let parts: Vec<&str> = payload.split('\u{1f}').collect();
-                    if parts.len() >= 2
-                        && let Ok(pid) = parts[0].trim().parse::<u32>()
-                    {
-                        let state = AgentState::parse(parts[1]);
-                        if state == AgentState::Idle {
-                            self.pane_agents.remove(&pid);
-                        } else {
-                            self.pane_agents.insert(
-                                pid,
-                                PaneAgent {
-                                    state,
-                                    agent: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
-                                    label: parts.get(3).map(|s| s.to_string()).unwrap_or_default(),
-                                },
-                            );
-                        }
-                        self.arm_timer();
-                        return true;
+                    self.apply_state_payload(payload);
+                    self.arm_timer();
+                    return true;
+                }
+                false
+            }
+            // A newly-loaded copy (new tab) asks peers to resend their state.
+            "zat_sync_request" => {
+                self.broadcast_state();
+                false
+            }
+            // A peer's full state dump (newline-separated agent_state payloads).
+            "zat_sync_state" => {
+                if let Some(payload) = pipe_message.payload.as_deref() {
+                    for line in payload.split('\n') {
+                        self.apply_state_payload(line);
                     }
+                    self.arm_timer();
+                    return true;
                 }
                 false
             }
@@ -861,7 +951,14 @@ impl ZellijPlugin for State {
     fn render(&mut self, rows: usize, cols: usize) {
         self.last_rows = rows;
 
-        if !self.permissions_granted || self.tabs.is_empty() {
+        if !self.permissions_granted {
+            return;
+        }
+        if let Some(err) = self.config_error.clone() {
+            self.render_error(rows, cols, &err);
+            return;
+        }
+        if self.tabs.is_empty() {
             return;
         }
 
@@ -876,6 +973,61 @@ impl State {
             self.timer_running = true;
             set_timeout(self.style.anim_interval_ms as f64 / 1000.0);
         }
+    }
+
+    /// Parse one "<pane_id>\x1f<state>\x1f<agent>\x1f<label>" payload into pane_agents.
+    fn apply_state_payload(&mut self, payload: &str) {
+        let parts: Vec<&str> = payload.split('\u{1f}').collect();
+        if parts.len() >= 2
+            && let Ok(pid) = parts[0].trim().parse::<u32>()
+        {
+            let state = AgentState::parse(parts[1]);
+            if state == AgentState::Idle {
+                self.pane_agents.remove(&pid);
+            } else {
+                self.pane_agents.insert(
+                    pid,
+                    PaneAgent {
+                        state,
+                        agent: parts.get(2).map(|s| s.to_string()).unwrap_or_default(),
+                        label: parts.get(3).map(|s| s.to_string()).unwrap_or_default(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Ask peer copies (other tabs) to resend their state — broadcast via `zellij pipe`.
+    fn request_state_sync(&self) {
+        run_command(
+            &["zellij", "pipe", "--name", "zat_sync_request"],
+            BTreeMap::new(),
+        );
+    }
+
+    /// Broadcast this copy's full state so late-joining copies can catch up.
+    fn broadcast_state(&self) {
+        if self.pane_agents.is_empty() {
+            return;
+        }
+        let payload = self
+            .pane_agents
+            .iter()
+            .map(|(id, pa)| {
+                format!(
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    id,
+                    pa.state.key(),
+                    pa.agent,
+                    pa.label
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        run_command(
+            &["zellij", "pipe", "--name", "zat_sync_state", "--", &payload],
+            BTreeMap::new(),
+        );
     }
 
     /// Any pane (adapter-reported OR a running/finished command pane) animated?
@@ -918,6 +1070,46 @@ impl State {
             .iter()
             .position(|&x| x == s)
             .unwrap_or(usize::MAX)
+    }
+
+    /// Idle border colour for the active tab (config override, else theme focused frame).
+    fn border_active(&self) -> ColorSpec {
+        self.style
+            .color_active_border
+            .unwrap_or_else(|| palette_to_spec(self.mode_info.style.colors.frame_selected.base))
+    }
+
+    /// Idle border colour for inactive tabs (config override, else theme unfocused frame).
+    fn border_inactive(&self) -> ColorSpec {
+        self.style.color_inactive_border.unwrap_or_else(|| {
+            self.mode_info
+                .style
+                .colors
+                .frame_unselected
+                .map(|d| palette_to_spec(d.base))
+                .unwrap_or(ColorSpec::EightBit(240))
+        })
+    }
+
+    /// Fill colour for a state: config override, else derived from the Zellij theme
+    /// (success colour for working/done, error colour for error, themed yellow for waiting).
+    fn state_color(&self, s: AgentState) -> ColorSpec {
+        let cfg = match s {
+            AgentState::Working => self.style.color_working,
+            AgentState::Waiting => self.style.color_waiting,
+            AgentState::Done => self.style.color_done,
+            AgentState::Error => self.style.color_error,
+            AgentState::Idle => return ColorSpec::Default,
+        };
+        cfg.unwrap_or_else(|| {
+            let c = &self.mode_info.style.colors;
+            match s {
+                AgentState::Working | AgentState::Done => palette_to_spec(c.exit_code_success.base),
+                AgentState::Error => palette_to_spec(c.exit_code_error.base),
+                AgentState::Waiting => ColorSpec::EightBit(3), // themed yellow (no theme "warning")
+                AgentState::Idle => ColorSpec::Default,
+            }
+        })
     }
 
     /// Aggregate agent state across a tab's panes: least-complete / highest-priority
@@ -970,98 +1162,136 @@ impl State {
             return vec![" ".repeat(cols); h];
         }
         let inner = cols - 2;
-        let anim = self.style.anim_for(state);
-        let color = self.style.color_for(state);
-        let dim = ColorSpec::EightBit(238);
         let reset = "\x1b[0m";
+        let dim = ColorSpec::EightBit(238);
 
-        // Per-frame border colour.
-        let border = match anim {
-            Anim::Flash => {
-                if self.frame % 2 == 0 {
-                    color
-                } else {
-                    dim
-                }
-            }
-            Anim::None => {
-                if state == AgentState::Idle {
-                    ColorSpec::EightBit(240)
-                } else {
-                    color
-                }
-            }
-            _ => color, // Solid, Scroll keep the base colour
+        let fc = if is_active {
+            self.border_active()
+        } else {
+            self.border_inactive()
         };
-        let bc = border.to_ansi_fg();
+        let sc = self.state_color(state);
+        let anim = self.style.anim_for(state);
+        let has_state = state != AgentState::Idle;
 
-        // Content: "index name", leaving a leading space inside the box.
+        // ---- border: state (if routed here) wins, else focus, else muted ----
+        let border_state = has_state && self.style.state_style.border;
+        let border_color = if border_state {
+            match anim {
+                Anim::Flash if self.frame % 2 != 0 => dim,
+                _ => sc,
+            }
+        } else if self.style.focus_style.border {
+            fc
+        } else {
+            ColorSpec::EightBit(240)
+        };
+        let bc = border_color.to_ansi_fg();
+        let border_scroll = border_state && anim == Anim::Scroll && inner > 0;
+
+        // ---- fill: state (if routed here), else focus-fill on the active tab ----
+        let fill_state = has_state && self.style.state_style.fill;
+        let fill_focus = !has_state && is_active && self.style.focus_style.fill;
+        let (fill_color, fill_on) = if fill_state {
+            (sc, !matches!(anim, Anim::Flash) || self.frame % 2 == 0)
+        } else if fill_focus {
+            (fc, true)
+        } else {
+            (ColorSpec::Default, false)
+        };
+        let fill_bg = if fill_on {
+            fill_color.to_ansi_bg()
+        } else {
+            String::new()
+        };
+        let fill_scroll = fill_state && anim == Anim::Scroll && inner > 0;
+        let scroll_pos = if border_scroll || fill_scroll {
+            Some((self.frame as usize) % inner)
+        } else {
+            None
+        };
+
+        // ---- glyph: a coloured indicator before the name ----
+        let glyph_state = has_state && self.style.state_style.glyph;
+        let glyph_focus = !has_state && is_active && self.style.focus_style.glyph;
+        let glyph_on = glyph_state || glyph_focus;
+        let glyph_fg = if glyph_state { sc } else { fc }.to_ansi_fg();
+        let glyph_w = if glyph_on {
+            self.style.state_glyph.width()
+        } else {
+            0
+        };
+
+        // Interior text, padded to the inner width (leading glyph or a space).
         let label = format!("{} {}", index, name);
-        let content = truncate_string(&label, inner.saturating_sub(1));
-        let content_w = content.width();
-        let pad = inner.saturating_sub(content_w + 1);
+        let mut interior = String::new();
+        if glyph_on {
+            interior.push_str(&self.style.state_glyph);
+            interior.push(' ');
+        } else {
+            interior.push(' ');
+        }
+        interior.push_str(&label);
+        let mut inner_text = truncate_string(&interior, inner);
+        for _ in inner_text.width()..inner {
+            inner_text.push(' ');
+        }
 
-        // Top border, with a moving "runner" cell when scrolling.
-        let top = {
+        // Horizontal border, with a scroll runner when state is routed to the border.
+        let hbar = |left: char, right: char| -> String {
             let mut s = String::new();
             s.push_str(&bc);
-            s.push('╭');
-            if anim == Anim::Scroll && inner > 0 {
-                let pos = (self.frame as usize) % inner;
-                s.push_str(&dim.to_ansi_fg());
-                for i in 0..inner {
-                    if i == pos {
-                        s.push_str(reset);
-                        s.push_str(&color.to_ansi_fg());
-                        s.push_str("\x1b[1m");
-                        s.push('━');
-                        s.push_str(reset);
-                        s.push_str(&dim.to_ansi_fg());
-                    } else {
-                        s.push('─');
-                    }
-                }
-                s.push_str(&bc);
-            } else {
-                for _ in 0..inner {
+            s.push(left);
+            for i in 0..inner {
+                if border_scroll && Some(i) == scroll_pos {
+                    s.push_str("\x1b[1m");
+                    s.push('━');
+                    s.push_str("\x1b[22m");
+                } else {
                     s.push('─');
                 }
             }
-            s.push('╮');
+            s.push(right);
             s.push_str(reset);
             s
         };
+        let top = hbar('╭', '╮');
+        let bottom = hbar('╰', '╯');
 
-        let bottom = {
-            let mut s = String::new();
-            s.push_str(&bc);
-            s.push('╰');
-            for _ in 0..inner {
-                s.push('─');
-            }
-            s.push('╯');
-            s.push_str(reset);
-            s
-        };
-
+        // A content row: side borders + (optionally filled) interior.
         let content_line = |with_content: bool| -> String {
             let mut s = String::new();
             s.push_str(&bc);
             s.push('│');
             s.push_str(reset);
-            s.push(' ');
-            if with_content {
-                if is_active {
-                    s.push_str("\x1b[1m");
-                }
-                s.push_str(&content);
-                if is_active {
-                    s.push_str(reset);
-                }
-                s.push_str(&" ".repeat(pad));
-            } else {
-                s.push_str(&" ".repeat(inner.saturating_sub(1)));
+            if fill_on {
+                s.push_str(&fill_bg);
             }
+            if with_content && is_active {
+                s.push_str("\x1b[1m");
+            }
+            let show_glyph = with_content && glyph_on;
+            if show_glyph {
+                s.push_str(&glyph_fg);
+            }
+            let chars: Vec<char> = if with_content {
+                inner_text.chars().collect()
+            } else {
+                vec![' '; inner]
+            };
+            for (i, ch) in chars.iter().enumerate() {
+                if show_glyph && i == glyph_w {
+                    s.push_str("\x1b[39m"); // end glyph colour, keep bg/bold
+                }
+                if fill_scroll && Some(i) == scroll_pos {
+                    s.push_str("\x1b[7m"); // reverse => bright moving cell on the fill
+                    s.push(*ch);
+                    s.push_str("\x1b[27m");
+                } else {
+                    s.push(*ch);
+                }
+            }
+            s.push_str(reset);
             s.push_str(&bc);
             s.push('│');
             s.push_str(reset);
@@ -1081,6 +1311,55 @@ impl State {
             lines.push(bottom);
         }
         lines
+    }
+
+    /// Render an obvious red banner across the whole pane (invalid config).
+    fn render_error(&self, rows: usize, cols: usize, msg: &str) {
+        let bg = ColorSpec::EightBit(196).to_ansi_bg();
+        let fg = ColorSpec::EightBit(231).to_ansi_fg();
+        let reset = "\x1b[0m";
+
+        // Word-wrap the message to the pane width.
+        let mut body: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for word in msg.split_whitespace() {
+            if cur.is_empty() {
+                cur = word.to_string();
+            } else if cur.width() + 1 + word.width() <= cols {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                body.push(std::mem::take(&mut cur));
+                cur = word.to_string();
+            }
+        }
+        if !cur.is_empty() {
+            body.push(cur);
+        }
+
+        let banner = |text: &str| -> String {
+            let mut t = truncate_string(text, cols);
+            for _ in t.width()..cols {
+                t.push(' ');
+            }
+            format!("{}{}{}{}", bg, fg, t, reset)
+        };
+
+        let mut lines: Vec<String> = Vec::with_capacity(rows);
+        lines.push(banner(" ⚠ agent-tabs config"));
+        for l in &body {
+            lines.push(banner(&format!(" {}", l)));
+        }
+        while lines.len() < rows {
+            lines.push(" ".repeat(cols));
+        }
+        for (i, line) in lines.iter().enumerate() {
+            if i + 1 < lines.len() {
+                println!("{}", line);
+            } else {
+                print!("{}", line);
+            }
+        }
     }
 
     fn get_focused_pane_title(&self, tab_position: usize) -> Option<String> {

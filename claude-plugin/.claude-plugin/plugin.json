@@ -1,0 +1,5 @@
+{
+  "name": "zellij-agent-tabs",
+  "description": "Reports Claude Code state (working/waiting/done/error) to the zellij-agent-tabs status plugin via `zellij pipe`.",
+  "version": "0.1.0"
+}

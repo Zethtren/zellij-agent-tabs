@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh working" } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh working" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh waiting" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh stop" } ] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh error" } ] }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh error" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/emit.sh idle" } ] }
+    ]
+  }
+}

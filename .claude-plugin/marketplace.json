@@ -1,0 +1,14 @@
+{
+  "name": "zellij-agent-tabs",
+  "description": "Agent-aware vertical tabs for Zellij, plus adapters that report agent/command state.",
+  "owner": {
+    "name": "Zethtren"
+  },
+  "plugins": [
+    {
+      "name": "zellij-agent-tabs",
+      "source": "./claude-plugin",
+      "description": "Reports Claude Code state (working/waiting/done/error) to the zellij-agent-tabs status plugin."
+    }
+  ]
+}
