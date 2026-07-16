@@ -1,0 +1,40 @@
+// Tmux-style layout with vertical tabs sidebar
+// Mimics your tmux.conf: index:pane_title* format, 13 char max
+
+layout {
+    pane split_direction="vertical" {
+        // Left sidebar - tmux-style tab list
+        pane size=24 borderless=true {
+            plugin location="file:~/zellij-vertical-tabs/target/wasm32-wasip1/release/zellij-vertical-tabs.wasm" {
+                // Inactive tabs: muted index, default name
+                // Format: "1:my-shell"
+                format " #[fg=muted]{index}#[fg=none]:#[fg=secondary]{=18:title}"
+
+                // Active tabs: accent index, bright name, green indicators
+                // Format: "2:vim*" with colors
+                format_active " #[fg=accent]{index}#[fg=none]:#[fg=none]{=18:title}#[fg=success]{indicators}"
+
+                // Custom indicators
+                indicator_active "*"
+                indicator_fullscreen "#[fg=error]F"
+                indicator_sync "#[fg=tertiary]S"
+
+                max_name_length 18
+
+                // 0-indexed like tmux
+                start_index 0
+
+                // No border separator
+                border ""
+
+                padding_top 1
+            }
+        }
+        // Main content pane
+        pane borderless=false focus=true
+    }
+
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

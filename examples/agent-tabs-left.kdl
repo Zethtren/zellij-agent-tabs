@@ -1,0 +1,31 @@
+// zellij-agent-tabs on the LEFT — rounded, multi-line, agent-aware tabs.
+//
+// Run from the repo (after `nix develop --command cargo build --release`):
+//   zellij --layout examples/agent-tabs-left.kdl
+//
+// On first run, focus the tab-bar pane and press `y` to grant permissions.
+layout {
+    pane split_direction="vertical" {
+        pane size=26 borderless=true {
+            plugin location="file:~/Code/Personal/zellij-agent-tabs/target/wasm32-wasip1/release/zellij-agent-tabs.wasm" {
+                tab_height 3
+                // All colours/animations below are DEFAULTS shown for reference —
+                // delete any line to keep the default, or change to customise.
+                color_working "green"
+                color_waiting "orange"
+                color_done    "green"
+                color_error   "red"
+                anim_working "scroll"
+                anim_waiting "flash"
+                anim_done    "solid"
+                anim_error   "flash"
+                anim_interval_ms 400
+                state_priority "error waiting working done idle"
+            }
+        }
+        pane
+    }
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}
