@@ -1,4 +1,4 @@
-name: Build Plugin
+name: Build & Release
 
 on:
   push:
@@ -8,54 +8,26 @@ on:
     branches: [ master ]
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   build:
-    name: Build wasm32-wasip1
+    name: Build (nix)
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      id-token: write   # for FlakeHub Cache
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - name: Setup cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm32-wasip1
-
-      - name: Build plugin
-        run: cargo build --release --target wasm32-wasip1
-
-      - name: Verify plugin exists
-        run: |
-          if [ -f "target/wasm32-wasip1/release/zellij-agent-tabs.wasm" ]; then
-            echo "Plugin found: target/wasm32-wasip1/release/zellij-agent-tabs.wasm"
-            ls -la "target/wasm32-wasip1/release/zellij-agent-tabs.wasm"
-          else
-            echo "Plugin not found!"
-            echo "Contents of release directory:"
-            ls -la "target/wasm32-wasip1/release/" || echo "Release directory doesn't exist"
-            exit 1
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: zellij-agent-tabs-wasm32-wasip1
-          path: target/wasm32-wasip1/release/zellij-agent-tabs.wasm
-          if-no-files-found: error
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
+      - name: nix build .#default
+        run: nix build .#default --print-build-logs
+      - run: ls -la result/share/zellij-agent-tabs/
 
   # Auto-versioning:
-  #   - push to master        -> patch bump from the latest v* tag (tag + Cargo.toml)
-  #   - push a tag vX.Y.Z      -> release that exact version (use for minor/major bumps)
-  # The Cargo.toml sync commit and the created tag use GITHUB_TOKEN, which by design
-  # does NOT trigger another workflow run (plus "[skip ci]" as belt-and-suspenders).
+  #   - push to master   -> patch bump from the latest v* tag (tag + Cargo.toml synced)
+  #   - push a tag vX.Y.Z -> release that exact version (use for minor/major bumps)
+  # The Cargo.toml sync commit + created tag use GITHUB_TOKEN, which by design does
+  # NOT trigger another workflow run (plus "[skip ci]" as belt-and-suspenders).
   release:
     name: Release
     needs: build
@@ -63,15 +35,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write   # for FlakeHub OIDC
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flakehub-cache-action@main
 
       - name: Determine version
         id: v
@@ -107,14 +77,22 @@ jobs:
           git tag "${{ steps.v.outputs.tag }}"
           git push origin "${{ steps.v.outputs.tag }}"
 
-      - name: Build wasm
-        run: cargo build --release --target wasm32-wasip1
+      - name: Build wasm (nix)
+        run: nix build .#default --print-build-logs
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.v.outputs.tag }}" \
-            "target/wasm32-wasip1/release/zellij-agent-tabs.wasm" \
+          cp result/share/zellij-agent-tabs/zellij-agent-tabs.wasm ./zellij-agent-tabs.wasm
+          gh release create "${{ steps.v.outputs.tag }}" ./zellij-agent-tabs.wasm \
             --title "${{ steps.v.outputs.tag }}" \
             --generate-notes
+
+      # Publishes the flake to FlakeHub (repo is connected). Runs after the GitHub
+      # release, so even if this hiccups the wasm download is already available.
+      - name: Publish to FlakeHub
+        uses: DeterminateSystems/flakehub-push@main
+        with:
+          visibility: public
+          tag: ${{ steps.v.outputs.tag }}
