@@ -68,6 +68,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
       - name: Determine version
         id: v
         run: |
@@ -102,20 +107,14 @@ jobs:
           git tag "${{ steps.v.outputs.tag }}"
           git push origin "${{ steps.v.outputs.tag }}"
 
-      - name: Collect wasm
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-      - run: |
-          mkdir -p release-artifacts
-          find artifacts -type f -name "*.wasm" -exec cp {} release-artifacts/ \;
-          ls -la release-artifacts/
+      - name: Build wasm
+        run: cargo build --release --target wasm32-wasip1
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
           name: ${{ steps.v.outputs.tag }}
-          files: release-artifacts/*
+          files: target/wasm32-wasip1/release/zellij-agent-tabs.wasm
           draft: false
           generate_release_notes: true
