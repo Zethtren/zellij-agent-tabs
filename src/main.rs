@@ -769,11 +769,17 @@ impl ZellijPlugin for State {
         let s = self.style.state_style;
         let f = self.style.focus_style;
         self.config_error = if s.border && f.border {
-            Some("state_style & focus_style both use the BORDER — set one to fill/glyph/none".into())
+            Some(
+                "state_style & focus_style both use the BORDER — set one to fill/glyph/none".into(),
+            )
         } else if s.fill && f.fill {
-            Some("state_style & focus_style both use the FILL — set one to border/glyph/none".into())
+            Some(
+                "state_style & focus_style both use the FILL — set one to border/glyph/none".into(),
+            )
         } else if s.glyph && f.glyph {
-            Some("state_style & focus_style both use the GLYPH — set one to fill/border/none".into())
+            Some(
+                "state_style & focus_style both use the GLYPH — set one to fill/border/none".into(),
+            )
         } else {
             None
         };
@@ -1581,9 +1587,14 @@ impl State {
                 let (state, label) = self.tab_agent(tab.position);
                 let name = label.unwrap_or_else(|| self.tab_display_name(&tab));
                 let start_row = lines.len();
-                for bl in
-                    self.render_box(i + self.style.start_index, tab.active, state, &name, cols, tab_h)
-                {
+                for bl in self.render_box(
+                    i + self.style.start_index,
+                    tab.active,
+                    state,
+                    &name,
+                    cols,
+                    tab_h,
+                ) {
                     if lines.len() >= rows {
                         break;
                     }

@@ -1,412 +1,343 @@
-# Vertical Tab Bar for Zellij
+# zellij-agent-tabs
 
-A zellij plugin that displays tabs vertically on the left or right side of the screen.
+Agent-aware **vertical** tab bar for [Zellij](https://zellij.dev). Tabs render as
+rounded, multi-line boxes down the left (or right) edge where the **border shows
+which tab you're in** and the **fill shows what that tab is doing** — an AI agent
+or a shell command: green while working, orange when it needs you, red on error.
 
-![Vertical Tab Bar Screenshot](screenshot.png)
+Built to answer one question at a glance: *which of my tabs needs me right now?*
 
-## Why Vertical Tabs?
+> Fork of the excellent [cfal/zellij-vertical-tabs](https://github.com/cfal/zellij-vertical-tabs)
+> (MIT). This fork adds the agent/command state model, theme-derived colours,
+> animation, a glyph channel, cross-tab state sync, and pluggable adapters
+> (Claude Code + shells). See [Credits](#credits).
 
-Horizontal tab bars become hard to read when you have many tabs - names get truncated and it's difficult to see all your tabs at a glance. A vertical tab bar shows each tab on its own row, making it easy to see all tab names and quickly navigate between them.
+---
 
-## Features
+## States
 
-- **Active tab highlighting** - Currently selected tab is visually distinct
-- **Mouse support** - Click any tab to switch to it
-- **Scroll wheel** - Scroll up/down over the tab bar to navigate tabs
-- **Overflow indicators** - `^ +N` and `v +N` for hidden tabs above/below
-- **Smart viewport** - Active tab always stays visible, viewport scrolls automatically
-- **Status indicators**:
-  - `*` - Active tab
-  - `Z` - Fullscreen mode active
-  - `S` - Sync panes mode active
-- **Tab numbering** - Each tab prefixed with its number (e.g., `1:shell`)
-- **Name truncation** - Long tab names truncated with `...` to fit width
-- **Tmux-style formatting** - Inline color syntax like `#[fg=accent]`
-- **Pane title support** - Display focused pane's terminal title via `{title}`
-- **Activity rows** - Optional extra lines under a tab, fed live by an external `pipe` message (e.g. surface an agent's running tasks)
+| State | Default look | Meaning |
+|-------|--------------|---------|
+| `working` | green fill, scrolling | agent/command actively running |
+| `waiting` | orange fill, flashing | needs you (a question, a permission, idle) |
+| `done`    | green fill, solid     | finished cleanly |
+| `error`   | red fill, flashing    | failed / non-zero exit |
+| `idle`    | no fill               | nothing running |
 
-## Requirements
+Colours default to your **Zellij theme** (focus/non-focus frame colours for the
+border; success/error colours for the fill) and are fully overridable. Where the
+state and focus are drawn (`fill` / `border` / `glyph`) is configurable too — see
+[Configuration](#configuration).
 
-- [Zellij](https://zellij.dev/) v0.40.0 or later
-- [Rust](https://rustup.rs/) toolchain (for building from source)
+---
 
-## Permissions
+## 0 → Claude notifications
 
-This plugin requires the following permissions:
+### 1. Get the plugin `.wasm`
 
-- **ReadApplicationState** - Required to receive tab information
-- **ChangeApplicationState** - Required to switch tabs when you click them
+Download `zellij-agent-tabs.wasm` from the [latest release](https://github.com/Zethtren/zellij-agent-tabs/releases/latest)
+and drop it somewhere stable:
 
-On first run, zellij will prompt you to grant permissions. Focus the plugin pane and press `y` to grant.
-
-If the permissions popup doesn't seem responsive, you can write to the permissions file directly. On Linux, edit `~/.cache/zellij/permissions.kdl` and add:
-
-```kdl
-"/absolute/path/to/zellij-vertical-tabs.wasm" {
-    ReadApplicationState
-    ChangeApplicationState
-}
+```sh
+mkdir -p ~/.config/zellij/plugins
+curl -fsSL -o ~/.config/zellij/plugins/zellij-agent-tabs.wasm \
+  https://github.com/Zethtren/zellij-agent-tabs/releases/latest/download/zellij-agent-tabs.wasm
 ```
 
-## Installation
+<details><summary>…or build it from source (Rust or Nix)</summary>
 
-### Download from Releases
+```sh
+# Rust: needs the wasm target
+rustup target add wasm32-wasip1
+cargo build --release            # .cargo/config.toml pins the target
+# → target/wasm32-wasip1/release/zellij-agent-tabs.wasm
 
-1. Download `zellij-vertical-tabs.wasm` from the [latest release](https://github.com/cfal/zellij-vertical-tabs/releases/latest)
-
-2. Copy it to your zellij plugins directory:
-   ```bash
-   mkdir -p ~/.config/zellij/plugins
-   cp zellij-vertical-tabs.wasm ~/.config/zellij/plugins/
-   ```
-
-### Building from Source
-
-1. **Install the WebAssembly target** (one-time setup):
-   ```bash
-   rustup target add wasm32-wasip1
-   ```
-
-2. **Clone and build**:
-   ```bash
-   git clone https://github.com/cfal/zellij-vertical-tabs.git
-   cd zellij-vertical-tabs
-   cargo build --release
-   ```
-
-3. **Copy the plugin** to your zellij plugins directory:
-   ```bash
-   mkdir -p ~/.config/zellij/plugins
-   cp target/wasm32-wasip1/release/zellij-vertical-tabs.wasm ~/.config/zellij/plugins/
-   ```
-
-## Usage
-
-### Quick Start
-
-Use one of the included layout files:
-
-```bash
-# Tab bar on the LEFT side
-zellij --layout examples/vertical-tabs-left.kdl
-
-# Tab bar on the RIGHT side
-zellij --layout examples/vertical-tabs-right.kdl
-
-# Tmux-style (minimal, with pane titles)
-zellij --layout examples/tmux-style.kdl
-
-# Tmux-style with colors (demonstrates inline color syntax)
-zellij --layout examples/tmux-colored.kdl
+# Nix (flake dev shell with the toolchain + zellij):
+nix develop --command cargo build --release
 ```
+</details>
 
-### Custom Layouts
+### 2. Add the layout
 
-Create your own layout file to customize the tab bar width and position.
+Save this as `~/.config/zellij/layouts/agent-tabs.kdl`:
 
-#### Tab Bar on Left (18 columns wide)
+<details><summary>agent-tabs.kdl (left sidebar)</summary>
 
 ```kdl
-// ~/.config/zellij/layouts/my-layout.kdl
+// Run:  zellij -l agent-tabs
 layout {
     pane split_direction="vertical" {
-        pane size=18 borderless=true {
-            plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm"
+        pane size=26 borderless=true {
+            plugin location="file:~/.config/zellij/plugins/zellij-agent-tabs.wasm" {
+                tab_height 3
+                // All optional — defaults derive from your Zellij theme:
+                // state_style "fill"      // fill | border | glyph | both | all | none
+                // focus_style "border"
+                // state_glyph "●"
+                // color_working "green"   // omit => theme
+                // anim_working "scroll"   // scroll | flash | solid | none
+                // anim_interval_ms 400
+                // state_priority "error waiting working done idle"
+            }
         }
-        pane
+        pane focus=true
     }
     pane size=1 borderless=true {
         plugin location="zellij:status-bar"
     }
 }
 ```
+</details>
 
-#### Tab Bar on Right (20 columns wide)
+Launch it (grant permissions on first run — focus the sidebar, press `y`):
 
-```kdl
-layout {
-    pane split_direction="vertical" {
-        pane  // Main content
-        pane size=20 borderless=true {
-            plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm"
-        }
-    }
-    pane size=1 borderless=true {
-        plugin location="zellij:status-bar"
-    }
-}
+```sh
+zellij -l agent-tabs
 ```
 
-#### Without Status Bar (maximized space)
+At this point tabs already react to **command panes** (`zellij run -- cargo build`)
+with no further setup. For typed shell commands, add a [shell adapter](#shell-adapters).
 
-```kdl
-layout {
-    pane split_direction="vertical" {
-        pane size=15 borderless=true {
-            plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm"
-        }
-        pane
-    }
-}
+### 3. Install the Claude Code adapter
+
+This is a small Claude Code **plugin** that ships hooks → it reports Claude's state
+to the tab bar. Enabling it touches nothing in your `settings.json` by hand.
+
+```sh
+# clone this repo somewhere (it doubles as a Claude plugin marketplace)
+git clone https://github.com/Zethtren/zellij-agent-tabs ~/src/zellij-agent-tabs
 ```
 
-### Setting as Default Layout
+Then inside Claude Code:
 
-To always use vertical tabs, set the layout in your zellij config:
-
-```kdl
-// ~/.config/zellij/config.kdl
-default_layout "vertical-tabs-left"
+```
+/plugin marketplace add ~/src/zellij-agent-tabs
+/plugin install zellij-agent-tabs@zellij-agent-tabs
 ```
 
-Then save your layout file as `~/.config/zellij/layouts/vertical-tabs-left.kdl`.
+### 4. Run Claude in a Zellij pane
+
+Start `claude` inside a pane of your `agent-tabs` session. Its tab now goes:
+
+- **green (working)** while Claude runs tools, labelled `claude <dir>: <command>`
+- **orange (waiting)** when Claude stops / needs your input
+- **red (error)** on a failed tool
+- clears when Claude exits
+
+> `Stop` maps to **waiting** by default (a finished turn is your cue to look). Prefer
+> solid-green "done" instead? `export ZAT_STOP_STATE=done`.
+
+> **Requirement:** Claude must run inside a Zellij pane (the adapter keys off
+> `$ZELLIJ_PANE_ID`, which Zellij exports into every pane).
 
 ---
 
-## Configuration Options
+## Shell adapters
 
-Configure the plugin in your layout file:
+Optional — only needed to light up **commands you type at a prompt** (agents and
+`zellij run` panes work without these). Each adapter defines an `agent-state`
+helper and reports `working` before a command and `done`/`error` after, keyed by
+`$ZELLIJ_PANE_ID`. Paste the block for your shell into its rc file.
 
-```kdl
-plugin location="file:~/.config/zellij/plugins/zellij-vertical-tabs.wasm" {
-    // Tab format (inactive tabs)
-    format "{index}:{name}"
+> ⚠️ **Only the `fish` adapter has been tested so far.** The others are best-effort
+> from each shell's documented hooks and may need tweaks — reports and PRs welcome.
 
-    // Active tab format
-    format_active "{index}:{name}*"
+<details><summary><b>fish</b> ✅ tested — <code>~/.config/fish/config.fish</code></summary>
 
-    // Status indicators
-    indicator_active "*"
-    indicator_fullscreen "Z"
-    indicator_sync "S"
-
-    // Maximum name length before truncation
-    max_name_length 15
-
-    // Right border (with optional color)
-    border "#[fg=dim]│"
-
-    // Start tab numbering from (default: 1)
-    start_index 1
-
-    // Empty rows above the tab list (default: 0)
-    padding_top 0
-
-    // Overflow indicator formats (when tabs don't fit)
-    overflow_above "  ^ +{count}"
-    overflow_below "  v +{count}"
-
-    // Activity row format ({activity} = the row text)
-    activity_format "#[fg=dim]{activity}"
-}
+```fish
+if set -q ZELLIJ
+    function agent-state
+        test -z "$ZELLIJ_PANE_ID"; and return 0
+        zellij pipe --name agent_state -- \
+            (printf '%s\x1f%s\x1f%s\x1f%s' "$ZELLIJ_PANE_ID" "$argv[1]" shell (string join ' ' -- $argv[2..-1]))
+    end
+    function __zat_pre --on-event fish_preexec
+        agent-state working $argv
+    end
+    function __zat_post --on-event fish_postexec
+        set -l st $status
+        test $st -eq 0; and agent-state done $argv; or agent-state error "exit $st: $argv"
+    end
+end
 ```
+</details>
 
-### Format Variables
-
-| Variable | Aliases | Description |
-|----------|---------|-------------|
-| `{index}` | `{i}` | Tab number |
-| `{name}` | `{n}` | Tab name |
-| `{title}` | `{t}` | Focused pane's terminal title |
-| `{indicators}` | | Combined status indicators |
-| `{fullscreen}` | | Fullscreen indicator if active |
-| `{sync}` | | Sync indicator if active |
-| `{active}` | | Active indicator if current tab |
-
-### Inline Color Syntax
-
-Use tmux-style inline colors in format strings:
-
-```
-#[fg=color]           - Set foreground color
-#[bg=color]           - Set background color
-#[fg=color,bg=color]  - Set both colors
-#[fg=color,dim]       - Set color with dim attribute
-#[fg=color,bold]      - Set color with bold attribute
-#[bg=color,fill]      - Fill entire row with background color
-#[fg=none]            - Reset to default
-```
-
-**Active tab row highlighting:**
-
-The `format_active` style controls how the active tab row looks:
-
-```kdl
-// Fill entire row with dark gray background
-format_active "#[bg=236,fill]{index}:{title}*"
-
-// Background color on text only (not padded to edge)
-format_active "#[bg=236]{index}:{title}*"
-
-// No row highlight, just colored text
-format_active "#[fg=green]{index}:{title}*"
-```
-
-**Color formats:**
-
-| Format | Example | Description |
-|--------|---------|-------------|
-| Named | `fg=dim` | Predefined color names |
-| 256-color | `fg=238` | 256-color palette (0-255) |
-| Hex RGB | `fg=#444444` | RGB hex (6 digits) |
-| Short hex | `fg=#444` | RGB hex (3 digits, expanded) |
-| RGB function | `fg=rgb(68,68,68)` | RGB values |
-
-**Named colors:**
-
-| Name | Aliases | Description |
-|------|---------|-------------|
-| `accent` | `primary` | Bright blue (39) |
-| `secondary` | | Light blue (75) |
-| `tertiary` | | Purple (141) |
-| `muted` | `quaternary` | Light gray (245) |
-| `dim` | `dimmed` | Dark gray (240) |
-| `red` | `error`, `warning` | Red (196) |
-| `green` | `success`, `ok` | Green (82) |
-| `black`, `white`, `yellow`, `blue`, `magenta`, `cyan`, `orange`, `gray`, `pink`, `purple` | | Standard colors |
-| `none` | `default`, `reset` | Terminal default |
-
-### Truncation
-
-Use `{=width:var}` to truncate a variable to a specific width:
-
-```kdl
-format "{index}:{=12:title}"  // Truncate title to 12 chars
-```
-
----
-
-## Mouse and Keyboard Interaction
-
-| Action | Effect |
-|--------|--------|
-| **Left click** on tab | Switch to that tab |
-| **Left click** on `^ +N` | Scroll view up / switch to tab above |
-| **Left click** on `v +N` | Scroll view down / switch to tab below |
-| **Scroll wheel up** | Switch to previous tab |
-| **Scroll wheel down** | Switch to next tab |
-
-Note: Standard zellij keybindings for tab management still work (e.g., `Ctrl+t` then `n` for new tab).
-
-## Tab Display Format
-
-Each tab is displayed as:
-
-```
-N:name INDICATORS
-```
-
-Where:
-- `N` - Tab number (1-indexed by default)
-- `name` - Tab name (truncated with `...` if too long)
-- `INDICATORS` - Status flags:
-  - `*` appears when tab is active
-  - `Z` appears when fullscreen mode is active in that tab
-  - `S` appears when sync panes mode is active
-
-### Examples
-
-```
-1:shell*        <- Active tab
-2:server        <- Inactive tab
-3:my-very-lo... <- Truncated name
-4:build Z       <- Fullscreen active
-5:terminals S   <- Sync panes active
-```
-
-## Overflow Behavior
-
-When you have more tabs than can fit in the available rows, the plugin shows overflow indicators:
-
-```
-  ^ +3           <- 3 tabs hidden above (click to scroll up)
-4:current*
-5:server
-6:logs
-  v +2           <- 2 tabs hidden below (click to scroll down)
-```
-
-The viewport automatically scrolls to keep the active tab visible when you switch tabs.
-
----
-
-## Activity Rows (pipe-fed)
-
-Beyond the tab list, the plugin can render **activity rows** beneath a tab — short lines driven by an external producer over zellij's plugin pipe. This is generic: anything that can run `zellij pipe` can feed it. The motivating use case is surfacing a coding agent's live state (running sub-agents, a todo list) next to the session it belongs to; [Claude Code](https://www.claude.com/product/claude-code) is one such producer.
-
-### Feeding activity
-
-Send a pipe message named `activity` with a JSON payload:
+<details><summary><b>bash</b> (untested) — <code>~/.bashrc</code></summary>
 
 ```bash
-zellij pipe --name activity -- '{
-  "zsession": "my-session",
-  "name": "build",
-  "subagents": {
-    "a1": { "icon": "⌕", "glyph": "◉", "title": "explore auth" }
-  },
-  "todos": [
-    { "status": "in_progress", "text": "run tests" },
-    { "status": "pending",     "text": "write migration" },
-    { "status": "done",        "text": "scaffold" }
-  ]
-}'
+agent-state() {
+  [ -z "$ZELLIJ_PANE_ID" ] && return 0
+  zellij pipe --name agent_state -- \
+    "$(printf '%s\x1f%s\x1f%s\x1f%s' "$ZELLIJ_PANE_ID" "$1" shell "${*:2}")"
+}
+__zat_at_prompt=1; __zat_last=""
+__zat_pre() {
+  [ -n "$COMP_LINE" ] && return
+  [ "$__zat_at_prompt" = 1 ] || return
+  __zat_at_prompt=0; __zat_last="$BASH_COMMAND"
+  agent-state working "$BASH_COMMAND"
+}
+__zat_post() {
+  local st=$?; __zat_at_prompt=1
+  [ -n "$__zat_last" ] || return
+  [ $st -eq 0 ] && agent-state done "$__zat_last" || agent-state error "exit $st: $__zat_last"
+  __zat_last=""
+}
+trap '__zat_pre' DEBUG
+case ";${PROMPT_COMMAND};" in *";__zat_post;"*) ;; *) PROMPT_COMMAND="__zat_post;${PROMPT_COMMAND}";; esac
 ```
+</details>
 
-| Field | Meaning |
-|-------|---------|
-| `zsession` | The zellij session the rows belong to. |
-| `name` | The tab/pane name the rows attach to. Rows render under the tab whose focused pane title (or tab name) matches. |
-| `subagents` | Map of `id → {icon, glyph, title}`. `icon`/`glyph` default to `⊜`/`⚙` when omitted. |
-| `todos` | List of `{status, text}`, where `status` is `pending`, `in_progress`, or `done`. |
+<details><summary><b>zsh</b> (untested) — <code>~/.zshrc</code></summary>
 
-### Rendering
+```zsh
+agent-state() {
+  [ -z "$ZELLIJ_PANE_ID" ] && return 0
+  zellij pipe --name agent_state -- \
+    "$(printf '%s\x1f%s\x1f%s\x1f%s' "$ZELLIJ_PANE_ID" "$1" shell "${*:2}")"
+}
+typeset -g __zat_last=""
+__zat_pre() { __zat_last="$1"; agent-state working "$1"; }
+__zat_post() {
+  local st=$?
+  [ -n "$__zat_last" ] || return
+  [ $st -eq 0 ] && agent-state done "$__zat_last" || agent-state error "exit $st: $__zat_last"
+  __zat_last=""
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec __zat_pre
+add-zsh-hook precmd  __zat_post
+```
+</details>
 
-- If `subagents` is non-empty, each renders as `  {icon} {glyph} {title}` (or `  {icon} {glyph}` when `title` is empty). **Subagents take priority** — when any are present, todos are not shown.
-- Otherwise, **non-done** todos render with a checkbox: `☐` pending, `▣` in_progress (done items are hidden). Up to 6 are shown; a trailing `  …` indicates more.
-- Rows are truncated to the tab bar width.
-- Styling is set by the `activity_format` layout option (default `#[fg=dim]{activity}`), where `{activity}` is the row text — uses the same inline color syntax as `format`.
+<details><summary><b>nushell</b> (untested) — <code>config.nu</code></summary>
 
-The plugin renders the most recent payload received for a given `(zsession, name)`. Freshness — for example dropping a finished sub-agent — is the producer's responsibility: send an updated payload to change what's shown.
+```nu
+let us = (char -i 31)
+$env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | default [] | append {||
+  if 'ZELLIJ_PANE_ID' in $env {
+    zellij pipe --name agent_state -- $"($env.ZELLIJ_PANE_ID)($us)working($us)shell($us)(commandline)"
+  }
+})
+$env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | default [] | append {||
+  if 'ZELLIJ_PANE_ID' in $env {
+    let s = (if $env.LAST_EXIT_CODE == 0 { "done" } else { "error" })
+    zellij pipe --name agent_state -- $"($env.ZELLIJ_PANE_ID)($us)($s)($us)shell($us)"
+  }
+})
+```
+</details>
+
+<details><summary><b>PowerShell</b> (untested; done/error only) — <code>$PROFILE</code></summary>
+
+```powershell
+# PowerShell has no native preexec; this reports done/error each prompt.
+$us = [char]0x1f
+function prompt {
+  if ($env:ZELLIJ_PANE_ID) {
+    $state = if ($?) { 'done' } else { 'error' }
+    zellij pipe --name agent_state -- "$($env:ZELLIJ_PANE_ID)$us$state${us}shell$us" | Out-Null
+  }
+  "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
+}
+```
+</details>
+
+<details><summary><b>elvish</b> (untested) — <code>~/.config/elvish/rc.elv</code></summary>
+
+```elvish
+set edit:before-readline = [$@edit:before-readline {
+  if (has-env ZELLIJ_PANE_ID) {
+    zellij pipe --name agent_state -- $E:ZELLIJ_PANE_ID"\x1fdone\x1fshell\x1f"
+  }
+}]
+set edit:after-readline = [$@edit:after-readline {|cmd|
+  if (has-env ZELLIJ_PANE_ID) {
+    zellij pipe --name agent_state -- $E:ZELLIJ_PANE_ID"\x1fworking\x1fshell\x1f"$cmd
+  }
+}]
+```
+</details>
+
+<details><summary><b>xonsh</b> (untested) — <code>~/.xonshrc</code></summary>
+
+```python
+import os
+US = "\x1f"
+def _zat(state, cmd=""):
+    pid = os.environ.get("ZELLIJ_PANE_ID")
+    if pid:
+        os.system(f"zellij pipe --name agent_state -- '{pid}{US}{state}{US}shell{US}{cmd}'")
+@events.on_precommand
+def _zat_pre(cmd, **_): _zat("working", cmd.strip())
+@events.on_postcommand
+def _zat_post(cmd, rtn=0, **_): _zat("done" if rtn == 0 else "error", cmd.strip())
+```
+</details>
+
+> Shells without `preexec`/`precmd` (plain POSIX `sh`, `tcsh`) can't auto-report,
+> but the `agent-state` helper still works if you call it manually.
+
+**Nested shells** (e.g. `bash` launched from `fish`): `$ZELLIJ_PANE_ID` is inherited
+by child processes, so whichever shell is reading input reports to the *same* tab.
+Load the adapter in each shell's rc for per-command reporting inside nested shells.
 
 ---
 
-## Troubleshooting
+## Configuration
 
-### Plugin doesn't load
+Set these in the layout's `plugin { … }` block. Everything is optional; omitted
+colours derive from your Zellij theme.
 
-- Check the path in your layout file is correct
-- Ensure the `.wasm` file exists at that path
-- Try using an absolute path instead of `~`
+| Key | Default | Notes |
+|-----|---------|-------|
+| `tab_height` | `3` | rows per tab box (≥ 2) |
+| `state_style` | `fill` | where state is drawn: `fill` `border` `glyph` `both` `all` `none` |
+| `focus_style` | `border` | where focus is drawn (same tokens) |
+| `state_glyph` | `●` | glyph used when the `glyph` channel is on |
+| `color_working` / `color_waiting` / `color_done` / `color_error` | theme | any of: name / 256 / `#hex` / `rgb(r,g,b)` |
+| `color_active_border` / `color_inactive_border` | theme | idle border colours |
+| `anim_working` / `anim_waiting` / `anim_done` / `anim_error` | scroll / flash / solid / flash | `scroll` `flash` `solid` `none` |
+| `anim_interval_ms` | `500` | animation tick |
+| `state_priority` | `error waiting working done idle` | which state wins when a tab has several panes |
 
-### Tab bar is empty / No tabs showing
+`state_style` and `focus_style` must not claim the same channel — if they do, the
+plugin renders an obvious red config banner instead of tabs.
 
-- **Most likely cause**: You haven't granted permissions yet
-- When zellij prompts for permissions, press `y` to grant
-- The plugin requires `ReadApplicationState` permission to receive tab info
-- Check if you see a permission prompt in the status bar
+Full annotated example with every option at its default: [docs/config-example.kdl](docs/config-example.kdl).
+Protocol (for writing your own adapter): [PROTOCOL.md](PROTOCOL.md).
 
-### Tabs not updating
+---
 
-- Verify the plugin is receiving events
-- Ensure `request_permission` is called before `subscribe`
+## How it works
 
-### Click not working
+- The plugin is agent-agnostic: it consumes `agent_state` messages over `zellij pipe`
+  and renders them. Anything that can run a shell command can be an adapter.
+- Zellij runs one copy of the plugin **per tab**; a copy that loads late (new tab)
+  broadcasts a sync request and peers resend their state, so tabs stay consistent.
 
-- Ensure `set_selectable(false)` is called in the plugin
-- Verify mouse events are being received
+---
 
-### New tabs show wrong title
+## Roadmap
 
-This is a known limitation. When a new tab is created, zellij sends the PaneUpdate event before the shell has set the terminal title via ANSI escape sequences. The plugin will show "..." until the title is available (usually after switching tabs or creating another tab).
+Tracked in [issues](https://github.com/Zethtren/zellij-agent-tabs/issues): more
+agent adapters (OpenAI/Codex, Grok, Gemini, …), a Nix module (auto-install +
+per-agent enable flags), right-side placement, square edges, tab gap / gapless
+layouts, hide/shrink keybinds, per-state text & cursor colours, and a
+`packages.default` flake output.
 
-## Resources
+---
 
-- [Zellij Documentation](https://zellij.dev/documentation/)
-- [Zellij Plugin Development](https://zellij.dev/documentation/plugins)
-- [zellij-tile crate docs](https://docs.rs/zellij-tile)
-- [Zellij GitHub](https://github.com/zellij-org/zellij)
+## Credits
+
+**Forked from [cfal/zellij-vertical-tabs](https://github.com/cfal/zellij-vertical-tabs)**
+by Alex Lau (MIT) — the vertical tab bar this project is built on. Huge thanks; go
+star the original.
+
+Built on [Zellij](https://zellij.dev) and [zellij-tile](https://crates.io/crates/zellij-tile).
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Original portions © 2026 Alex Lau; modifications
+© 2026 Zethtren. The upstream MIT license text is retained verbatim in
+[LICENSE](LICENSE).

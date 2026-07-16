@@ -1,0 +1,60 @@
+// zellij-agent-tabs — fully-annotated example layout.
+//
+// Every plugin option is shown below AT ITS DEFAULT VALUE. Delete a line to keep
+// the default, or change it to customise. Save as ~/.config/zellij/layouts/agent-tabs.kdl
+// and run:  zellij -l agent-tabs
+//
+// (Colours accept any of: a name like "green", a 256-colour index like "82",
+//  a hex "#ff8800", or "rgb(255,136,0)".)
+
+layout {
+    // Vertical split: sidebar on the left, your work on the right.
+    // For tabs on the RIGHT, put the `pane focus=true` FIRST and the plugin pane second.
+    pane split_direction="vertical" {
+
+        pane size=26 borderless=true {
+            plugin location="file:~/.config/zellij/plugins/zellij-agent-tabs.wasm" {
+
+                // --- layout ---
+                tab_height 3            // rows per tab box (>= 2). 3 = top border / name / bottom border.
+
+                // --- where things are drawn (channels: fill | border | glyph | both | all | none) ---
+                state_style "fill"      // where the agent/action STATE colour is shown
+                focus_style "border"    // where the FOCUS (active/inactive) colour is shown
+                //   NOTE: state_style and focus_style must NOT share a channel. If both use
+                //   "border" (or both "fill", or both "glyph"), the plugin shows a red config
+                //   banner instead of tabs. Default (fill vs border) is conflict-free.
+                state_glyph "●"         // glyph drawn before the name when a "glyph" channel is on
+
+                // --- state colours (omit any line => derive from your Zellij theme) ---
+                // color_working "green"   // theme: success colour
+                // color_waiting "orange"  // theme: yellow (themes have no "warning")
+                // color_done    "green"   // theme: success colour
+                // color_error   "red"     // theme: error colour
+
+                // --- focus (border) colours (omit => theme frame focus/non-focus) ---
+                // color_active_border   "white"
+                // color_inactive_border "240"
+
+                // --- animation per state (scroll | flash | solid | none) ---
+                anim_working "scroll"   // moving highlight = actively running
+                anim_waiting "flash"    // blink = needs you
+                anim_done    "solid"    // steady = finished
+                anim_error   "flash"    // blink = failed
+                anim_interval_ms 500    // animation tick in milliseconds
+
+                // --- multi-pane aggregation ---
+                // When a tab has several panes with different states, the LEFTMOST listed
+                // (least-complete / most-urgent) wins.
+                state_priority "error waiting working done idle"
+            }
+        }
+
+        pane focus=true
+    }
+
+    // Optional bottom status bar (Zellij's built-in). Remove if you don't want it.
+    pane size=1 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

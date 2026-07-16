@@ -1,4 +1,7 @@
-Copyright (c) 2026 Alex Lau <github@alau.ca>
+MIT License
+
+Copyright (c) 2026 Alex Lau <github@alau.ca> (original: zellij-vertical-tabs)
+Copyright (c) 2026 Zethtren (modifications: zellij-agent-tabs)
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
