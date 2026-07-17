@@ -34,7 +34,35 @@
           wasm = rustPlatform.buildRustPackage {
             pname = "zellij-agent-tabs";
             version = "0.0.1";
-            src = ./.;
+            # Only files that affect the wasm build, with Cargo.toml's version pinned
+            # to a constant. This keeps the store path STABLE across version-only
+            # release bumps and doc/CI edits, so FlakeHub Cache hits stay valid across
+            # releases (the real version lives in the git tag).
+            src =
+              let
+                lib = pkgs.lib;
+                buildFiles = lib.fileset.toSource {
+                  root = ./.;
+                  fileset = lib.fileset.unions [
+                    ./Cargo.lock
+                    ./src
+                    ./activity
+                    ./.cargo
+                    ./claude-plugin/scripts/emit.sh
+                  ];
+                };
+                cargoToml = pkgs.writeText "Cargo.toml" (
+                  lib.concatStringsSep "\n" (
+                    map (l: if lib.hasPrefix "version = " l then ''version = "0.0.0"'' else l)
+                      (lib.splitString "\n" (builtins.readFile ./Cargo.toml))
+                  )
+                );
+              in
+              pkgs.runCommand "zellij-agent-tabs-src" { } ''
+                cp -r ${buildFiles}/. "$out"
+                chmod -R +w "$out"
+                cp ${cargoToml} "$out/Cargo.toml"
+              '';
 
             cargoLock = {
               lockFile = ./Cargo.lock;
