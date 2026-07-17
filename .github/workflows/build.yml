@@ -7,9 +7,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Builds on Linux AND macOS so both the x86_64-linux and aarch64-darwin
+  # derivations get pushed to FlakeHub Cache — otherwise Apple Silicon users
+  # (whose store path differs by build system) always miss and rebuild locally.
   build:
     name: Build (nix)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
     permissions:
       contents: read
       id-token: write   # for FlakeHub Cache
