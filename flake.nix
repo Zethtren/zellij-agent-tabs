@@ -10,7 +10,8 @@
 
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
+      # x86_64-darwin dropped: nixpkgs-unstable (26.11+) no longer supports it.
+      systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
 
       # home-manager module (see nix/hm-module.nix); consumers import this.
       flake.homeManagerModules.default = import ./nix/hm-module.nix inputs.self;
